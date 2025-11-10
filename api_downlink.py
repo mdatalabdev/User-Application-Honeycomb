@@ -8,6 +8,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from auth import models,schemas,database,auth
+from typing import Optional
+import pyotp
+import qrcode
+import base64
+from io import BytesIO
 import json
 import os
 import logging
@@ -59,11 +64,62 @@ def register(user: schemas.UserCreate,current_user = Depends(auth.get_current_us
     db.refresh(new_user)
     return new_user
 
+@app.post("/downlink/mfa/enable", summary="Enable MFA for existing user")
+def enable_mfa(current_user = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    """
+    Enables MFA for the currently authenticated user.
+    Generates a new MFA secret, stores it in DB, and returns the provisioning URI and QR code.
+    """
+
+    # Check if MFA already enabled
+    if current_user.mfa_secret:
+        raise HTTPException(status_code=400, detail="MFA already enabled for this user")
+
+    # Generate a new MFA secret
+    mfa_secret = pyotp.random_base32()
+    totp = pyotp.TOTP(mfa_secret)
+    provisioning_uri = totp.provisioning_uri(current_user.email, issuer_name="Honeycomb DL")
+
+    # Generate QR code (Base64-encoded PNG)
+    qr_img = qrcode.make(provisioning_uri)
+    buf = BytesIO()
+    qr_img.save(buf, format='PNG')
+    qr_base64 = base64.b64encode(buf.getvalue()).decode()
+
+    # Store the new MFA secret in DB
+    db_user = db.query(models.User).filter(models.User.id == current_user.id).first()
+    db_user.mfa_secret = mfa_secret
+    db.commit()
+
+    return {
+        "message": "MFA enabled successfully",
+        "email": current_user.email,
+        "mfa_secret": mfa_secret,
+        "mfa_uri": provisioning_uri,
+        "mfa_qr_base64_png": f"data:image/png;base64,{qr_base64}"
+    }
+    
+
+@app.post("/downlink/mfa/status", summary="To check mfa status")
+def status_mfa(current_user = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    """
+    Returns whether MFA is enabled for the currently authenticated user.
+    """
+
+    is_enabled = bool(current_user.mfa_secret)
+
+    return {
+        "email": current_user.email,
+        "mfa_enabled": is_enabled,
+        "message": "MFA is enabled" if is_enabled else "MFA is disabled"
+    }
+
 class LoginRequest(BaseModel):
     captcha_id: str
     encrypted_input: dict  # { "iv": ..., "ciphertext": ..., "tag": ... }
     identity: dict
     secret: dict
+    mfa_code: Optional[str] = None
 
 @app.post("/downlink/login", response_model=schemas.Token)
 async def login(
@@ -95,10 +151,67 @@ async def login(
     user = auth.authenticate_user(db, username, password)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials. Request a new captcha.")
+    
+    # MFA logic
+    if user.mfa_secret:  # MFA enabled
+        if not data.mfa_code:
+            raise HTTPException(status_code=400, detail="MFA code required")
+        totp = pyotp.TOTP(user.mfa_secret)
+        if not totp.verify(data.mfa_code):
+            raise HTTPException(status_code=401, detail="Invalid MFA code")
+    # else → MFA disabled → skip OTP
 
     # 5. Create access token
     access_token = auth.create_access_token(data={"sub": str(user.id)})
     return {"access_token": access_token, "token_type": "bearer"}
+
+@app.post("/downlink/mfa/reset")
+def reset_mfa(current_user = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    
+    new_secret = pyotp.random_base32()
+    totp = pyotp.TOTP(new_secret)
+    provisioning_uri = totp.provisioning_uri(current_user.email, issuer_name="Honeycomb DL")
+
+    qr_img = qrcode.make(provisioning_uri)
+    buf = BytesIO()
+    qr_img.save(buf, format='PNG')
+    qr_base64 = base64.b64encode(buf.getvalue()).decode()
+
+    # update DB
+    user = db.query(models.User).filter(models.User.id == current_user.id).first()
+    user.mfa_secret = new_secret
+    db.commit()
+    db.refresh(user)
+
+    return {
+        "status": "ok",
+        "message": "MFA secret regenerated",
+        "mfa_secret": new_secret,
+        "mfa_uri": provisioning_uri,
+        "mfa_qr_base64_png": f"data:image/png;base64,{qr_base64}"
+    }
+
+class MFADisableRequest(BaseModel):
+    mfa_code: str
+
+@app.post("/downlink/mfa/disable")
+def disable_mfa(body: MFADisableRequest, current_user = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+    
+    user = db.query(models.User).filter(models.User.id == current_user.id).first()
+
+    if not user.mfa_secret:
+        raise HTTPException(status_code=400, detail="MFA not enabled")
+
+    totp = pyotp.TOTP(user.mfa_secret)
+    if not totp.verify(body.mfa_code):
+        raise HTTPException(status_code=401, detail="Invalid MFA code")
+
+    user.mfa_secret = None
+    db.commit()
+    db.refresh(user)
+
+    return {"status":"ok","message":"MFA disabled successfully"}
+
 
 @app.get("/downlink/me", response_model=schemas.UserResponse)
 def read_users_me(current_user = Depends(auth.get_current_user)):
