@@ -19,6 +19,7 @@ def fetch_notifications(token, limit=500, offset=0):
     Fetch notifications from EdgeX
     """
     try:
+        # print(f"printing the token {token}")
         headers = {
             'Authorization': f'Bearer {token}',
             'Content-Type': 'application/json'
@@ -40,7 +41,7 @@ def fetch_notifications(token, limit=500, offset=0):
         data = response.json()
         notifications = data.get("notifications", [])
 
-        logger.info(f"Fetched {len(notifications)} notifications (offset={offset})")
+        # logger.info(f"Fetched {len(notifications)} notifications (offset={offset})")
 
         return notifications
 
@@ -91,9 +92,9 @@ def ingest_notifications():
             total_processed += len(new_notifications)
             offset += limit
 
-            logger.info(
-                f"Batch fetched: {batch_count}, Inserted: {len(new_notifications)}, Total inserted: {total_processed}"
-            )
+            # logger.info(
+            #     f"Batch fetched: {batch_count}, Inserted: {len(new_notifications)}, Total inserted: {total_processed}"
+            # )
 
             #  exit when last page reached
             if batch_count < limit:
