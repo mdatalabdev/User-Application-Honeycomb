@@ -9,8 +9,6 @@ from sklearn.metrics import confusion_matrix
 from Predictive_ML.ml.trainers.xgboost import train_xgboost
 from Predictive_ML.ml.trainers.lstm import train_lstm
 import numpy as np
-import torch
-from sklearn.metrics import confusion_matrix
 from sklearn.preprocessing import StandardScaler
 import torch
 
@@ -28,7 +26,7 @@ def create_sequences(df, feature_cols, target_col, seq_length, horizon_steps, pr
 
         if prediction_type == "fault":
             future = df.iloc[i+seq_length:i+seq_length+horizon_steps][target_col]
-            seq_y = int(future.max() > 0)
+            seq_y = int(future.max())  # 0=normal, 1=pre-failure, 2=failure
 
         else:  # sensor
             seq_y = df.iloc[
@@ -55,7 +53,7 @@ def resolve_window_status(status_series):
     else:
         return "OK"
     
-def horizon_to_steps(horizon: str, freq_minutes: int) -> int:
+def horizon_to_steps(horizon: str, freq_minutes: float) -> int:
     horizon_map = {
         "1h": 60,
         "6h": 360,
@@ -65,7 +63,7 @@ def horizon_to_steps(horizon: str, freq_minutes: int) -> int:
     if horizon not in horizon_map:
         raise ValueError("Invalid horizon. Use 1h, 6h, 24h")
 
-    return horizon_map[horizon] // freq_minutes
+    return int(horizon_map[horizon] / freq_minutes)
 
 def covert_csv_to_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     '''
@@ -117,7 +115,7 @@ def covert_csv_to_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     # 🔹 Bring status + label (per window)
     meta_df = df.groupby("window_start").agg({
         "status": resolve_window_status,
-        "label": "first"
+        "label": "max"
     })
 
     # 🔹 Merge
@@ -195,7 +193,7 @@ class TrainService:
         algorithm: str = "random_forest",
         test_size: float = 0.2,
         random_state: int = 42,
-        freq_minutes: int = 5
+        freq_minutes: float = 5
     ) -> Dict[str, Any]:
 
         # 🔹 Load + preprocess
@@ -242,11 +240,21 @@ class TrainService:
             if len(X_seq) == 0:
                 raise ValueError("Not enough data to create sequences")
 
-            model = train_lstm(X_seq, y_seq, prediction_type,device=device)
+            num_classes = int(np.max(y_seq)) + 1 if prediction_type == "fault" else None
 
-            metrics = {
-                "info": "LSTM trained (basic metrics not implemented)"
-            }
+            split_idx = int(len(X_seq) * 0.8)
+            model = train_lstm(X_seq[:split_idx], y_seq[:split_idx], prediction_type, device=device, num_classes=num_classes)
+
+            if prediction_type == "fault" and len(X_seq[split_idx:]) > 0:
+                model.eval()
+                with torch.no_grad():
+                    X_test_t = torch.tensor(X_seq[split_idx:], dtype=torch.float32).to(device)
+                    logits = model(X_test_t).cpu().numpy()
+                preds = np.argmax(logits, axis=1)
+                cm = confusion_matrix(y_seq[split_idx:], preds, labels=list(range(num_classes))).tolist()
+                metrics = {"confusion_matrix": cm}
+            else:
+                metrics = {"info": "LSTM trained"}
 
             features_used = feature_cols
 
@@ -302,18 +310,19 @@ class TrainService:
         if algorithm == "lstm":
             metadata.update({
                 "sequence_length": seq_length,
-                "horizon_steps": steps
+                "horizon_steps": steps,
+                "num_classes": num_classes
             })
 
-        #  Store model
-        await store_model(model_name, model, metadata)
+        model_to_store = (model, scaler) if algorithm == "lstm" else model
+        await store_model(model_name, model_to_store, metadata)
 
         return {
             "model_name": model_name,
             "metrics": metrics,
             "metadata": metadata
         }
-        
+
 
     async def train_specific_model(
         self,
@@ -326,7 +335,7 @@ class TrainService:
         algorithm: str = "random_forest",
         test_size: float = 0.2,
         random_state: int = 42,
-        freq_minutes: int = 5
+        freq_minutes: float = 5
     ) -> Dict[str, Any]:
         '''
         if prediction_type == "fault" then all the 3 algorithms can be used but if prediction_type is "sensor" then only LSTM can be used since RF and XGBoost are not good for regression problems with time series data.
@@ -384,12 +393,21 @@ class TrainService:
             if len(X_seq) == 0:
                 raise ValueError("Not enough data to create sequences")
 
-            model = train_lstm(X_seq, y_seq, prediction_type,device=device)
+            num_classes = int(np.max(y_seq)) + 1 if prediction_type == "fault" else None
 
+            split_idx = int(len(X_seq) * 0.8)
+            model = train_lstm(X_seq[:split_idx], y_seq[:split_idx], prediction_type, device=device, num_classes=num_classes)
 
-            metrics = {
-                "info": "LSTM trained (basic metrics not implemented)"
-            }
+            if prediction_type == "fault" and len(X_seq[split_idx:]) > 0:
+                model.eval()
+                with torch.no_grad():
+                    X_test_t = torch.tensor(X_seq[split_idx:], dtype=torch.float32).to(device)
+                    logits = model(X_test_t).cpu().numpy()
+                preds = np.argmax(logits, axis=1)
+                cm = confusion_matrix(y_seq[split_idx:], preds, labels=list(range(num_classes))).tolist()
+                metrics = {"confusion_matrix": cm}
+            else:
+                metrics = {"info": "LSTM trained"}
 
             features_used = feature_cols
 
@@ -447,11 +465,12 @@ class TrainService:
         if algorithm == "lstm":
             metadata.update({
                 "sequence_length": seq_length,
-                "horizon_steps": steps
+                "horizon_steps": steps,
+                "num_classes": num_classes
             })
 
-        # 🔹 Store model
-        await store_model(model_name, model, metadata)
+        model_to_store = (model, scaler) if algorithm == "lstm" else model
+        await store_model(model_name, model_to_store, metadata)
 
         return {
             "model_name": model_name,
@@ -460,7 +479,7 @@ class TrainService:
         }
 
     @staticmethod
-    async def future_predict(data, model, metadata):
+    async def future_predict(data, model, metadata, freq_minutes_override: float = None):
         '''
         if prediction_type == "fault" then all the 3 algorithms can be used but if prediction_type is "sensor" then only LSTM can be used since RF and XGBoost are not good for regression problems with time series data.
         '''
@@ -475,7 +494,7 @@ class TrainService:
 
         expected_features = metadata.get("features", [])
         horizon = metadata.get("horizon")
-        freq_minutes = metadata.get("freq_minutes", 5)
+        freq_minutes = freq_minutes_override if freq_minutes_override is not None else metadata.get("freq_minutes", 5)
         algorithm = metadata.get("algorithm")
         prediction_type = metadata.get("prediction_type")
 
@@ -499,11 +518,14 @@ class TrainService:
                 raise ValueError("Not enough data for LSTM")
 
             seq = df.iloc[-seq_len:][expected_features].values
-            X = torch.tensor(seq, dtype=torch.float32).unsqueeze(0).to(device)
-            print(type(model))
-            print(model)
+
+            scaler = None
             if isinstance(model, tuple):
-                model = model[0]
+                model, scaler = model
+            if scaler is not None:
+                seq = scaler.transform(seq)
+
+            X = torch.tensor(seq, dtype=torch.float32).unsqueeze(0).to(device)
             model = model.to(device)
             model.eval()
             with torch.no_grad():
@@ -519,10 +541,32 @@ class TrainService:
 
             # 🔹 Fault
             if prediction_type == "fault":
-                probs = torch.sigmoid(torch.tensor(output)).numpy().tolist()
-                values = [1 if p > 0.5 else 0 for p in probs]
-                confidence = [abs(p - 0.5) * 2 for p in probs]
+                logits = torch.tensor(output)
+                class_probs = torch.softmax(logits, dim=0).numpy().tolist()
+                predicted_class = int(np.argmax(class_probs))
+                values = [predicted_class]
+                probs = [class_probs]
+                confidence = [max(class_probs)]
+
+                # confusion matrix on historical labeled sequences
                 cm = None
+                if "label" in df.columns and len(df) > seq_len:
+                    try:
+                        num_classes = metadata.get("num_classes", 3)
+                        feat_vals = df[expected_features].values
+                        label_vals = df["label"].values
+                        n = len(df) - seq_len
+                        hist_X = np.array([feat_vals[i:i+seq_len] for i in range(n)])
+                        hist_y = np.array([int(label_vals[i+seq_len]) for i in range(n)])
+                        if scaler is not None:
+                            s, t, f = hist_X.shape
+                            hist_X = scaler.transform(hist_X.reshape(-1, f)).reshape(s, t, f)
+                        X_hist = torch.tensor(hist_X, dtype=torch.float32).to(device)
+                        with torch.no_grad():
+                            hist_preds = np.argmax(model(X_hist).cpu().numpy(), axis=1)
+                        cm = confusion_matrix(hist_y, hist_preds, labels=list(range(num_classes))).tolist()
+                    except Exception:
+                        cm = None
 
             # 🔹 Sensor
             else:
@@ -583,11 +627,12 @@ class TrainService:
 
             # 🔹 Confusion Matrix (optional)
             cm = None
-            if prediction_type == "fault" and "label" in df.columns:
+            if prediction_type == "fault" and "label" in df.columns and len(df) >= steps:
                 try:
                     y_true = df["label"].iloc[-steps:].tolist()
-                    y_pred_expanded = values[:len(y_true)]
-                    cm = confusion_matrix(y_true, y_pred_expanded).tolist()
+                    if y_true:
+                        y_pred_expanded = values[:len(y_true)]
+                        cm = confusion_matrix(y_true, y_pred_expanded).tolist()
                 except Exception:
                     cm = None
 
@@ -602,10 +647,10 @@ class TrainService:
                     "mode": "single_step",
                     "horizon": horizon
                 }
-            }      
-            
+            }
+
     @staticmethod
-    async def predict_future_asset(df: pd.DataFrame, model, metadata: dict) -> dict:
+    async def predict_future_asset(df: pd.DataFrame, model, metadata: dict, freq_minutes_override: float = None) -> dict:
         '''
     if prediction_type == "fault" then all the 3 algorithms can be used but if prediction_type is "sensor" then only LSTM can be used since RF and XGBoost are not good for regression problems with time series data.
         '''
@@ -618,7 +663,7 @@ class TrainService:
 
         expected_features = metadata.get("features", [])
         horizon = metadata.get("horizon")
-        freq_minutes = metadata.get("freq_minutes", 5)
+        freq_minutes = freq_minutes_override if freq_minutes_override is not None else metadata.get("freq_minutes", 5)
         algorithm = metadata.get("algorithm")
         prediction_type = metadata.get("prediction_type")
 
@@ -642,10 +687,14 @@ class TrainService:
                 raise ValueError("Not enough data for LSTM prediction")
 
             seq = df.iloc[-seq_len:][expected_features].values
-            X = torch.tensor(seq, dtype=torch.float32).unsqueeze(0).to(device)
 
+            scaler = None
             if isinstance(model, tuple):
-                model = model[0]
+                model, scaler = model
+            if scaler is not None:
+                seq = scaler.transform(seq)
+
+            X = torch.tensor(seq, dtype=torch.float32).unsqueeze(0).to(device)
             model = model.to(device)
 
             model.eval()
@@ -660,10 +709,32 @@ class TrainService:
             ]
 
             if prediction_type == "fault":
-                probs = torch.sigmoid(torch.tensor(output)).numpy().tolist()
-                values = [1 if p > 0.5 else 0 for p in probs]
-                confidence = [abs(p - 0.5) * 2 for p in probs]
+                logits = torch.tensor(output)
+                class_probs = torch.softmax(logits, dim=0).numpy().tolist()
+                predicted_class = int(np.argmax(class_probs))
+                values = [predicted_class]
+                probs = [class_probs]
+                confidence = [max(class_probs)]
+
+                # confusion matrix on historical labeled sequences
                 cm = None
+                if "label" in df.columns and len(df) > seq_len:
+                    try:
+                        num_classes = metadata.get("num_classes", 3)
+                        feat_vals = df[expected_features].values
+                        label_vals = df["label"].values
+                        n = len(df) - seq_len
+                        hist_X = np.array([feat_vals[i:i+seq_len] for i in range(n)])
+                        hist_y = np.array([int(label_vals[i+seq_len]) for i in range(n)])
+                        if scaler is not None:
+                            s, t, f = hist_X.shape
+                            hist_X = scaler.transform(hist_X.reshape(-1, f)).reshape(s, t, f)
+                        X_hist = torch.tensor(hist_X, dtype=torch.float32).to(device)
+                        with torch.no_grad():
+                            hist_preds = np.argmax(model(X_hist).cpu().numpy(), axis=1)
+                        cm = confusion_matrix(hist_y, hist_preds, labels=list(range(num_classes))).tolist()
+                    except Exception:
+                        cm = None
             else:
                 values = [
                     float(x) if np.isfinite(x) else 0.0
@@ -720,11 +791,12 @@ class TrainService:
 
             # 🔹 Optional confusion matrix
             cm = None
-            if prediction_type == "fault" and "label" in df.columns:
+            if prediction_type == "fault" and "label" in df.columns and len(df) >= steps:
                 try:
                     y_true = df["label"].iloc[-steps:].tolist()
-                    y_pred_expanded = values[:len(y_true)]
-                    cm = confusion_matrix(y_true, y_pred_expanded).tolist()
+                    if y_true:
+                        y_pred_expanded = values[:len(y_true)]
+                        cm = confusion_matrix(y_true, y_pred_expanded).tolist()
                 except Exception:
                     cm = None
 

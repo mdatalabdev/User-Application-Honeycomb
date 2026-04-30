@@ -1926,6 +1926,7 @@ def list_training_datasets(
 ######################################################################
 class TrainModelRequest(BaseModel):
     model_name: str = Field(..., description="User-defined unique model name")
+    asset_id: str
     dataset_path: str
     model_type: Literal["random_forest", "xgboost", "lstm"]
     target_column: str  # "label" or the name of the target column in the dataset
@@ -1963,13 +1964,18 @@ async def submit_training_job(
     async def _run():
         try:
             await redis_client.set(key, json.dumps({"status": "running"}))
+
+            window_length = await redis_client.get(f"Window_length:{payload.asset_id}")
+            freq_minutes = int(window_length) / 60 if window_length else 5.0
+
             train_service = TrainService()
             result = await train_service.train(
                 csv_path=payload.dataset_path,
                 target_column=payload.target_column,
                 user_model_name=payload.model_name,
                 algorithm=payload.model_type,
-                horizon=payload.horizon
+                horizon=payload.horizon,
+                freq_minutes=freq_minutes
             )
             await redis_client.set(key, json.dumps({
                 "status": "completed",
@@ -2391,6 +2397,7 @@ async def fetch_train_asset_model(
                 horizon=payload.horizon,
                 equipment_type=payload.model_name,
                 thresholds=threshold_map,
+                freq_minutes=payload.window_length / 60,
             )
  
             await redis_client.set(key, json.dumps({
