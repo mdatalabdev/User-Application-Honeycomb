@@ -68,7 +68,8 @@ async def predict(model_name, asset_id):
 
     # 🔹 Predict
     predictions = await TrainService.future_predict(
-        labeled_data, model, metadata
+        labeled_data, model, metadata,
+        freq_minutes_override=window_length / 60
     )
 
     # 🔹 Build response
@@ -175,7 +176,8 @@ async def predict_specific(model_name, asset_id):
     # 🔹 Predict (USING FIXED FUNCTION)
     # =========================================================
     predictions = await TrainService.predict_future_asset(
-        df, model, metadata
+        df, model, metadata,
+        freq_minutes_override=window_length / 60
     )
 
     # =========================================================

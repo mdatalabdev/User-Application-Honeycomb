@@ -81,9 +81,10 @@ def handle_missing_windows(processed_data: list):
         sensor_failed = False
 
         for row in rows:
-            if row["avg"] is not None and not sensor_failed:
+            if row["avg"] is not None:
                 last_valid = row["avg"]
                 missing_count = 0
+                sensor_failed = False
                 row["status"] = "OK"
 
             else:
@@ -110,7 +111,7 @@ def label_data(aggregated_data, threshold_map):
 
         label = 0 # Default: normal
 
-        if sensor in threshold_map:
+        if value is not None and sensor in threshold_map:
             pf = threshold_map[sensor]["prefailure"]
             fl = threshold_map[sensor]["failure"]
 

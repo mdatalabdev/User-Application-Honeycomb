@@ -14,29 +14,30 @@ class LSTMModel(nn.Module):
         out = out[:, -1, :]  # last timestep
         return self.fc(out)
 
-def train_lstm(X, y, prediction_type, device=device):
+def train_lstm(X, y, prediction_type, device=device, num_classes=None):
 
-    X = torch.tensor(X, dtype=torch.float32)   
-    y = torch.tensor(y, dtype=torch.float32)
+    X = torch.tensor(X, dtype=torch.float32)
+
+    if prediction_type == "fault":
+        y = torch.tensor(y, dtype=torch.long)
+        output_size = num_classes if num_classes is not None else int(y.max().item()) + 1
+        criterion = nn.CrossEntropyLoss()
+    else:
+        y = torch.tensor(y, dtype=torch.float32)
+        output_size = y.shape[1] if len(y.shape) > 1 else 1
+        criterion = nn.MSELoss()
 
     model = LSTMModel(
         input_size=X.shape[2],
-        hidden_size=64,   #  reduce from 128
-        output_size=y.shape[1] if len(y.shape) > 1 else 1
+        hidden_size=64,
+        output_size=output_size
     ).to(device)
 
-    if prediction_type == "fault":
-        pos_weight = (len(y) - y.sum()) / (y.sum() + 1e-6)
-        pos_weight = pos_weight.to(device)
-
-        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    else:
-        criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=0.0005)
 
-    batch_size = 32   #  IMPORTANT
+    batch_size = 32
 
-    for epoch in range(100):
+    for _ in range(100):
         model.train()
 
         for i in range(0, len(X), batch_size):
@@ -47,16 +48,12 @@ def train_lstm(X, y, prediction_type, device=device):
             optimizer.zero_grad()
 
             outputs = model(X_batch)
-
-            if prediction_type == "fault":
-                loss = criterion(outputs.squeeze(), y_batch)
-            else:
-                loss = criterion(outputs, y_batch)
+            loss = criterion(outputs, y_batch)
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
-        torch.cuda.empty_cache()  #  helps fragmentation
+        torch.cuda.empty_cache()
 
     return model
