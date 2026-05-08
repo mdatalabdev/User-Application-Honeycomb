@@ -1982,7 +1982,9 @@ async def submit_training_job(
                 "model_name": payload.model_name,
                 "target_column": payload.target_column,
                 "metrics": result["metrics"],
-                "metadata": result["metadata"]
+                "metadata": result["metadata"],
+                "sensor_correlation": result["sensor_correlation"],
+                "label_info": result["label_info"]
             }))
         except Exception as e:
             logging.error(f"Training failed: {e}", exc_info=True)
@@ -2405,7 +2407,9 @@ async def fetch_train_asset_model(
                 "model_name": payload.model_name,
                 "target_column": payload.target_column,
                 "metrics": result["metrics"],
-                "metadata": result["metadata"]
+                "metadata": result["metadata"],
+                "sensor_correlation": result["sensor_correlation"],
+                "label_info": result["label_info"]
             }))
         except Exception as e:
             logging.error(f"Fetch-train job failed: {e}", exc_info=True)
