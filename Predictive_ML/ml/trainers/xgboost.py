@@ -14,9 +14,11 @@ def train_xgboost(X, y, test_size=0.2, random_state=42):
         y=y_train
     )
 
+    num_classes = int(y.max()) + 1
+
     model = XGBClassifier(
         objective="multi:softprob",
-        num_class=3,
+        num_class=num_classes,
         eval_metric="mlogloss",
         n_estimators=400,
         max_depth=6,

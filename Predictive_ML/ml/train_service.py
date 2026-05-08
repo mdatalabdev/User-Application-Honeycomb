@@ -312,8 +312,9 @@ class TrainService:
                     X_test_t = torch.tensor(X_seq[split_idx:], dtype=torch.float32).to(device)
                     logits = model(X_test_t).cpu().numpy()
                 preds = np.argmax(logits, axis=1)
+                accuracy = float((preds == y_seq[split_idx:]).mean())
                 cm = confusion_matrix(y_seq[split_idx:], preds, labels=list(range(num_classes))).tolist()
-                metrics = {"confusion_matrix": cm}
+                metrics = {"accuracy": accuracy, "confusion_matrix": cm}
             else:
                 metrics = {"info": "LSTM trained"}
 
@@ -323,6 +324,9 @@ class TrainService:
         #  TABULAR MODELS (RF / XGBOOST)
         # =========================================================
         else:
+            if prediction_type == "sensor":
+                raise ValueError(f"{algorithm} does not support sensor prediction. Use lstm instead.")
+
             # 🔹 create FUTURE label (only for tabular models)
             df[target_column] = df[target_column].shift(-steps)
             df = df.dropna(subset=[target_column])
@@ -493,8 +497,9 @@ class TrainService:
                     X_test_t = torch.tensor(X_seq[split_idx:], dtype=torch.float32).to(device)
                     logits = model(X_test_t).cpu().numpy()
                 preds = np.argmax(logits, axis=1)
+                accuracy = float((preds == y_seq[split_idx:]).mean())
                 cm = confusion_matrix(y_seq[split_idx:], preds, labels=list(range(num_classes))).tolist()
-                metrics = {"confusion_matrix": cm}
+                metrics = {"accuracy": accuracy, "confusion_matrix": cm}
             else:
                 metrics = {"info": "LSTM trained"}
 
@@ -504,6 +509,9 @@ class TrainService:
         # TABULAR MODELS (RF / XGBOOST)
         # =========================================================
         else:
+
+            if prediction_type == "sensor":
+                raise ValueError(f"{algorithm} does not support sensor prediction. Use lstm instead.")
 
             # 🔹 create FUTURE label (ONLY for tabular models)
             df[target_column] = df[target_column].shift(-steps)
@@ -693,8 +701,17 @@ class TrainService:
                     for x in output.tolist()
                 ]
                 probs = None
-                confidence = [1.0] * len(values)
                 cm = None
+                target_col = metadata.get("target_column")
+                if target_col and target_col in df.columns:
+                    hist_mean = float(df[target_col].mean())
+                    hist_std = float(df[target_col].std()) + 1e-6
+                    confidence = [
+                        float(max(0.05, min(1.0, np.exp(-0.5 * ((v - hist_mean) / hist_std) ** 2))))
+                        for v in values
+                    ]
+                else:
+                    confidence = None
 
             return {
                 "timestamps": timestamps,
@@ -745,16 +762,17 @@ class TrainService:
                 named_probs = {fault_labels.get(i, f"Class {i}"): round(p, 4) for i, p in enumerate(base_prob)}
             else:
                 probs = None
-                confidence = [1.0] * steps
+                confidence = None
 
-            # 🔹 Confusion Matrix (optional)
+            # 🔹 Confusion Matrix — evaluate model across all rows in the window
             cm = None
-            if prediction_type == "fault" and "label" in df.columns and len(df) >= steps:
+            if prediction_type == "fault" and "label" in df.columns:
                 try:
-                    y_true = df["label"].iloc[-steps:].tolist()
-                    if y_true:
-                        y_pred_expanded = values[:len(y_true)]
-                        cm = confusion_matrix(y_true, y_pred_expanded).tolist()
+                    X_all = df[expected_features]
+                    y_all_pred = model.predict(X_all)
+                    y_all_true = df["label"].astype(int).values
+                    num_classes = len(fault_labels)
+                    cm = confusion_matrix(y_all_true, y_all_pred, labels=list(range(num_classes))).tolist()
                 except Exception:
                     cm = None
 
@@ -893,8 +911,17 @@ class TrainService:
                     for x in output.tolist()
                 ]
                 probs = None
-                confidence = [1.0] * len(values)
                 cm = None
+                target_col = metadata.get("target_column")
+                if target_col and target_col in df.columns:
+                    hist_mean = float(df[target_col].mean())
+                    hist_std = float(df[target_col].std()) + 1e-6
+                    confidence = [
+                        float(max(0.05, min(1.0, np.exp(-0.5 * ((v - hist_mean) / hist_std) ** 2))))
+                        for v in values
+                    ]
+                else:
+                    confidence = None
 
             return {
                 "timestamps": timestamps,
@@ -944,16 +971,17 @@ class TrainService:
                 named_probs = {fault_labels.get(i, f"Class {i}"): round(p, 4) for i, p in enumerate(base_prob)}
             else:
                 probs = None
-                confidence = [1.0] * steps
+                confidence = None
 
-            # 🔹 Optional confusion matrix
+            # 🔹 Confusion Matrix — evaluate model across all rows in the window
             cm = None
-            if prediction_type == "fault" and "label" in df.columns and len(df) >= steps:
+            if prediction_type == "fault" and "label" in df.columns:
                 try:
-                    y_true = df["label"].iloc[-steps:].tolist()
-                    if y_true:
-                        y_pred_expanded = values[:len(y_true)]
-                        cm = confusion_matrix(y_true, y_pred_expanded).tolist()
+                    X_all = df[expected_features]
+                    y_all_pred = model.predict(X_all)
+                    y_all_true = df["label"].astype(int).values
+                    num_classes = len(fault_labels)
+                    cm = confusion_matrix(y_all_true, y_all_pred, labels=list(range(num_classes))).tolist()
                 except Exception:
                     cm = None
 
