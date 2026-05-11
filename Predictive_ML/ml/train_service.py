@@ -248,7 +248,9 @@ class TrainService:
             corr_col = f"corr_{col_a}__{col_b}"
             df[corr_col] = df[col_a].rolling(5, min_periods=2).corr(df[col_b])
             feature_cols.append(corr_col)
-        df = df.dropna(subset=[c for c in feature_cols if c.startswith("corr_")])
+            
+        df[feature_cols] = df[feature_cols].replace([np.inf, -np.inf], np.nan)
+        df = df.dropna(subset=feature_cols)
 
         # Sensor correlation matrix on raw values before scaling — for frontend heatmap
         sensor_corr_df = df[corr_source_cols].corr().round(3)
@@ -464,6 +466,9 @@ class TrainService:
             "imbalance_warning": bool(label_counts.max() / label_counts.sum() > 0.8)
         }
 
+        df[feature_cols] = df[feature_cols].replace([np.inf, -np.inf], np.nan)
+        df = df.dropna(subset=feature_cols)
+
         scaler = StandardScaler()
         df[feature_cols] = scaler.fit_transform(df[feature_cols])
         # =========================================================
@@ -595,7 +600,7 @@ class TrainService:
         corr_pairs = metadata.get("correlation_pairs", [])
         for col_a, col_b in corr_pairs:
             corr_col = f"corr_{col_a}__{col_b}"
-            df[corr_col] = df[col_a].rolling(5, min_periods=2).corr(df[col_b]).fillna(0)
+            df[corr_col] = df[col_a].rolling(5, min_periods=2).corr(df[col_b]).replace([np.inf, -np.inf], np.nan).fillna(0)
 
         # Live sensor correlation from the incoming data window
         live_sensor_cols = [
@@ -637,7 +642,7 @@ class TrainService:
             if len(df) < seq_len:
                 raise ValueError("Not enough data for LSTM")
 
-            seq_df = df.iloc[-seq_len:][expected_features]
+            seq_df = df.iloc[-seq_len:][expected_features].replace([np.inf, -np.inf], np.nan).fillna(0)
 
             scaler = None
             if isinstance(model, tuple):
@@ -808,7 +813,7 @@ class TrainService:
         corr_pairs = metadata.get("correlation_pairs", [])
         for col_a, col_b in corr_pairs:
             corr_col = f"corr_{col_a}__{col_b}"
-            df[corr_col] = df[col_a].rolling(5, min_periods=2).corr(df[col_b]).fillna(0)
+            df[corr_col] = df[col_a].rolling(5, min_periods=2).corr(df[col_b]).replace([np.inf, -np.inf], np.nan).fillna(0)
 
         # Live sensor correlation from the incoming data window
         live_sensor_cols = [
@@ -850,7 +855,7 @@ class TrainService:
             if len(df) < seq_len:
                 raise ValueError("Not enough data for LSTM prediction")
 
-            seq_df = df.iloc[-seq_len:][expected_features]
+            seq_df = df.iloc[-seq_len:][expected_features].replace([np.inf, -np.inf], np.nan).fillna(0)
 
             scaler = None
             if isinstance(model, tuple):
